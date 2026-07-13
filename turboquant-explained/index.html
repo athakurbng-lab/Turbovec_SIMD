@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TurboQuant Explained</title>
+  <meta name="description" content="A visual, simple explanation of TurboQuant: quasi-sparsity, random rotation, PolarQuant, QJL, vector search, and KV cache compression.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="hero">
+    <nav class="nav" aria-label="Page sections">
+      <a href="#problem">Problem</a>
+      <a href="#rotation">Rotation</a>
+      <a href="#polarquant">PolarQuant</a>
+      <a href="#qjl">QJL</a>
+      <a href="#vector-db">Vector DB</a>
+      <a href="#android-bench">Android Bench</a>
+      <a href="#kv-cache">KV Cache</a>
+    </nav>
+
+    <div class="hero-grid">
+      <section class="hero-copy">
+        <p class="eyebrow">Visual guide</p>
+        <h1>TurboQuant explained without the math fog</h1>
+        <p class="lede">
+          LLM vectors often look smooth in meaning but spiky in coordinates. TurboQuant makes them easier to compress by changing the coordinate story, then storing the leftover error as tiny sign bits.
+        </p>
+        <div class="hero-actions">
+          <a class="button primary" href="#problem">Start with the vector</a>
+          <a class="button ghost" href="#vector-db">Jump to vector search</a>
+        </div>
+      </section>
+
+      <section class="hero-visual" aria-label="TurboQuant pipeline">
+        <div class="pipeline-card">
+          <div class="chip danger">spiky vector</div>
+          <div class="vector-bars mini" id="heroBars"></div>
+          <div class="flow-line"></div>
+          <div class="pipeline-row">
+            <span>rotate</span>
+            <span>polar</span>
+            <span>QJL bits</span>
+          </div>
+          <div class="bit-row" aria-label="Residual sign bits">
+            <b>0</b><b>1</b><b>0</b><b>1</b><b>1</b><b>0</b><b>0</b><b>1</b>
+          </div>
+        </div>
+      </section>
+    </div>
+  </header>
+
+  <main>
+    <section class="section intro">
+      <div class="section-copy">
+        <p class="eyebrow">Running example</p>
+        <h2>One vector, all the way through</h2>
+        <p>
+          We will use the same 8-dimensional key/value style vector throughout the page. Real LLM vectors are much larger, but this small one makes the mechanics visible.
+        </p>
+      </div>
+      <div class="code-strip">
+        <code>x = [0.12, -0.08, 0.15, 9.80, -0.11, 0.06, -10.20, 0.18]</code>
+      </div>
+    </section>
+
+    <section class="section split" id="problem">
+      <div class="section-copy">
+        <p class="eyebrow">1. The problem</p>
+        <h2>Quasi-sparsity: a few channels dominate the scale</h2>
+        <p>
+          The vector is not sparse because most entries are nonzero. But it is quasi-sparse because two channels carry almost all of the magnitude. A normal low-bit quantizer must cover the whole range from about -10 to +10, so subtle values around 0.1 get crushed into coarse buckets.
+        </p>
+        <div class="metric-row">
+          <div><strong>99.95%</strong><span>energy in two channels</span></div>
+          <div><strong>~1.33</strong><span>4-bit grid step over full range</span></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Original Cartesian coordinates</h3>
+          <span>outliers set the grid</span>
+        </div>
+        <div class="vector-bars" id="originalBars"></div>
+        <article class="index-quant-card section-quant-card">
+          <span class="step">standard 4-bit bins</span>
+          <h3>Bins are decided by the original min and max</h3>
+          <p>
+            The running vector has <code>min = -10.20</code> and <code>max = 9.80</code>, so 16 bins must cover a 20-point range. The step is <code>(9.80 - -10.20) / 15 = 1.333</code>.
+          </p>
+          <div class="bin-strip" id="standardBins"></div>
+          <div class="error-list" id="standardErrorList"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="rotation">
+      <div class="section-copy wide">
+        <p class="eyebrow">2. Random rotation</p>
+        <h2>Same geometry, less spiky coordinates</h2>
+        <p>
+          An orthogonal random rotation changes the coordinate system, not the information. Distances, angles, inner products, and cosine relationships are preserved when compatible vectors are rotated the same way. What changes is that the energy gets spread across many coordinates instead of sitting in a few outlier channels.
+        </p>
+      </div>
+      <div class="compare-grid">
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Before rotation</h3>
+            <span>two huge coordinates</span>
+          </div>
+          <div class="vector-bars compact" id="beforeRotate"></div>
+        </div>
+        <div class="rotation-core" aria-hidden="true">
+          <div class="ring">
+            <span>R</span>
+          </div>
+          <p>orthogonal<br>rotation</p>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h3>After rotation</h3>
+            <span>energy spread out</span>
+          </div>
+          <div class="vector-bars compact" id="rotatedBars"></div>
+        </div>
+      </div>
+      <div class="formula-band">
+        <code>(Rq) dot (Rk) = q dot k</code>
+        <span>That is why rotation can help quantization without changing the semantic geometry.</span>
+      </div>
+      <article class="index-quant-card section-quant-card">
+        <span class="step">rotated 4-bit bins</span>
+        <h3>The same vector lands in smoother bins</h3>
+        <p>
+          After rotation, the example coordinates sit between <code>-5.02</code> and <code>5.31</code>. The 4-bit bins are closer together, and no single dimension owns the whole scale.
+        </p>
+        <div class="bin-strip" id="rotatedBins"></div>
+        <div class="error-list" id="rotatedErrorList"></div>
+      </article>
+    </section>
+
+    <section class="section split" id="polarquant">
+      <div class="section-copy">
+        <p class="eyebrow">3. PolarQuant</p>
+        <h2>Store each pair as magnitude plus direction</h2>
+        <p>
+          PolarQuant groups coordinates into pairs and rewrites each pair as a radius and an angle. A pair like <code>(0.15, 9.80)</code> no longer means "one tiny value beside one huge outlier." It means "a long vector pointing almost vertical."
+        </p>
+        <p>
+          The radius carries magnitude. The angle carries how that magnitude is split between the two coordinates. The small coordinate survives because it changes the angle.
+        </p>
+      </div>
+      <div class="panel polar-panel">
+        <div class="panel-head">
+          <h3>Cartesian pairs become polar codes</h3>
+          <span>using the same vector</span>
+        </div>
+        <div class="polar-grid" id="polarGrid"></div>
+        <figure class="polar-reference">
+          <img src="assets/quantization-google-snapshot.png" alt="Google Research PolarQuant animation snapshot showing Cartesian input transformed into polar representation">
+          <figcaption>
+            This Google Research snapshot shows the PolarQuant move: the blue Cartesian representation is transformed into a yellow polar representation. In this page's running example, that means pairs such as <code>(0.15, 9.80)</code> are binned by radius and angle before dequantization. <a href="assets/quantization-google.mp4">Open the referenced MP4</a>.
+          </figcaption>
+        </figure>
+        <article class="index-quant-card section-quant-card">
+          <span class="step">polar bins</span>
+          <h3>Pair bins keep magnitude and direction separate</h3>
+          <p>
+            PolarQuant bins each pair by radius and angle. The large pair <code>(0.15, 9.80)</code> keeps the fact that it points almost straight up, instead of treating <code>0.15</code> as noise beside an outlier.
+          </p>
+          <span class="bin-caption">radius bins</span>
+          <div class="bin-strip paired" id="polarRadiusBins"></div>
+          <span class="bin-caption">angle bins</span>
+          <div class="bin-strip paired" id="polarAngleBins"></div>
+          <div class="error-list" id="polarErrorList"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section split reverse" id="qjl">
+      <div class="section-copy">
+        <p class="eyebrow">4. QJL residual bits</p>
+        <h2>The leftover error becomes signs</h2>
+        <p>
+          PolarQuant captures most of the vector. It still leaves a small residual error. TurboQuant's product-oriented version uses a one-bit Quantized Johnson-Lindenstrauss correction: project the residual in random directions and store only whether each projection is positive or negative.
+        </p>
+        <p>
+          The residual is just the quantization mistake left after dequantizing the PolarQuant code: <code>residual = original vector - dequantized PolarQuant vector</code>. For the running example, if <code>d4</code> starts as <code>9.800</code> and PolarQuant reconstructs it as <code>9.807</code>, then the residual at that dimension is <code>9.800 - 9.807 = -0.007</code>.
+        </p>
+        <p>
+          QJL is not trying to store every residual coordinate exactly. It takes random dot products with that residual and stores only the sign of each result. Those signs preserve useful correction information for inner products without storing another full vector.
+        </p>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Residual compression</h3>
+          <span>float leftovers to sign bits</span>
+        </div>
+        <div class="residual-box">
+          <div>
+            <span class="label">1. dequantized PolarQuant vector</span>
+            <code>x_hat = [0.121, -0.079, 0.148, 9.807, -0.108, 0.061, -10.191, 0.177]</code>
+          </div>
+          <div>
+            <span class="label">2. residual = x - x_hat</span>
+            <code>[0.120, -0.080, 0.150, 9.800, -0.110, 0.060, -10.200, 0.180] - x_hat</code>
+            <code>[-.001, -.001, +.002, -.007, -.002, -.001, -.009, +.003]</code>
+          </div>
+          <div class="arrow-down">&darr; random projections</div>
+          <div>
+            <span class="label">3. stored QJL bits</span>
+            <div class="bit-row large">
+              <b>0</b><b>1</b><b>0</b><b>1</b><b>1</b><b>0</b><b>0</b><b>1</b>
+            </div>
+            <p class="residual-note">
+              Each bit is <code>1</code> when one random projection of the residual is positive, and <code>0</code> when it is negative. During scoring, those signs help correct the bias left by the quantized approximation.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="vector-db">
+      <div class="section-copy wide">
+        <p class="eyebrow">Application 1</p>
+        <h2>TurboQuant in a vector database</h2>
+        <p>
+          For vector search, the expensive thing is storing and scanning millions or billions of document embeddings. A practical design keeps documents compressed, keeps the query in FP32, searches compressed codes for candidate recall, then dequantizes only the top candidates for a better cosine rerank.
+        </p>
+      </div>
+      <div class="db-flow">
+        <article class="flow-card">
+          <span class="step">index time</span>
+          <h3>Document vector arrives</h3>
+          <code>[0.12, -0.08, ..., -10.20]</code>
+          <p>Rotate, polar-quantize, store QJL residual bits.</p>
+        </article>
+        <article class="flow-card">
+          <span class="step">stored row</span>
+          <h3>Compact vector code</h3>
+          <code>r, theta codes + 01011001</code>
+          <p>Metadata points back to document text and chunk id.</p>
+        </article>
+        <article class="flow-card accent">
+          <span class="step">query time</span>
+          <h3>Query stays FP32</h3>
+          <code>q = embedding("budget laptop")</code>
+          <p>No memory reason to quantize one temporary query.</p>
+        </article>
+        <article class="flow-card">
+          <span class="step">top-k search</span>
+          <h3>Compressed ANN candidates</h3>
+          <code>top 1000 candidates</code>
+          <p>Fast approximate scan over compressed representations.</p>
+        </article>
+        <article class="flow-card">
+          <span class="step">rerank</span>
+          <h3>Dequantize candidates only</h3>
+          <code>cosine(q_fp32, x_hat)</code>
+          <p>Recover accuracy where it matters: the final shortlist.</p>
+        </article>
+      </div>
+      <div class="quant-summary panel">
+        <div class="panel-head">
+          <h3>Same vector quantized two ways</h3>
+          <span>4-bit toy example</span>
+        </div>
+        <p>
+          Standard min-max quantization uses one grid for the whole vector, so the two outliers consume most of the 16 buckets. TurboQuant first changes the coordinate story, then stores compact codes plus residual signs, so dequantized shortlist vectors stay closer to the original.
+        </p>
+        <div class="quant-table-wrap">
+          <table class="quant-table">
+            <thead>
+              <tr>
+                <th>Dim</th>
+                <th>Original</th>
+                <th>Standard 4-bit step</th>
+                <th>Standard code</th>
+                <th>Standard dequant</th>
+                <th>TurboQuant step</th>
+                <th>TurboQuant code</th>
+                <th>TurboQuant dequant</th>
+              </tr>
+            </thead>
+            <tbody id="quantTable"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>Key design choice:</strong>
+        <span>Do not dequantize every vector in the index for every query. Use compressed search for recall, then dequantize only the candidate pool.</span>
+      </div>
+    </section>
+
+    <section class="section android-bench" id="android-bench">
+      <div class="section-copy wide">
+        <p class="eyebrow">Android benchmark app</p>
+        <h2>S25 Ultra vector-search benchmark</h2>
+        <p>
+          This repo now includes a native Android app that can download either the first 50,000 or first 1,000,000 Cohere 768-dimensional vectors, then benchmarks every available dataset in one table. Downloads and benchmarks run in foreground services, continue with the app backgrounded or screen off, and resumable downloads keep saved partial files. The app builds FP32 exact, bundled HNSW, and TurboQuant indexes on-device, caps raw database staging at 100 MB, and reports recall, index size, RAM, and warm query latency.
+        </p>
+        <div class="hero-actions bench-actions">
+          <a class="button primary" href="releases/android/TurboQuantBench-release.apk">Download release APK</a>
+          <a class="button ghost" href="android/TurboQuantBench/">Open Android source</a>
+          <a class="button ghost" href="turbovec/turbovec/src/search.rs">Open Rust search code</a>
+        </div>
+      </div>
+
+      <div class="bench-hero-grid">
+        <article class="bench-stat">
+          <span>Best warm latency</span>
+          <strong>81.8 us/query</strong>
+          <p>2-bit TurboQuant over 50K vectors, top-10 search.</p>
+        </article>
+        <article class="bench-stat">
+          <span>Best balanced point</span>
+          <strong>4-bit: 146.7 us/query</strong>
+          <p>99.20% random R@1, 100.00% random R@10, 18.5 MB index.</p>
+        </article>
+        <article class="bench-stat">
+          <span>Exact baseline</span>
+          <strong>4.16 ms/query</strong>
+          <p>FP32 brute-force exact scan over 50,000 x 768 floats.</p>
+        </article>
+      </div>
+
+      <div class="bench-table-wrap">
+        <table class="bench-table">
+          <thead>
+            <tr>
+              <th>Method</th>
+              <th>Dataset</th>
+              <th>Vectors</th>
+              <th>Bits</th>
+              <th>Self R@1</th>
+              <th>Self R@10</th>
+              <th>Random R@1</th>
+              <th>Random R@10</th>
+              <th>Index ms</th>
+              <th>Prep ms</th>
+              <th>Write ms</th>
+              <th>Self ms</th>
+              <th>Random ms</th>
+              <th>us/query</th>
+              <th>ROM</th>
+              <th>RAM delta</th>
+            </tr>
+          </thead>
+          <tbody id="androidKpiTable"></tbody>
+        </table>
+      </div>
+
+      <div class="bench-viz-grid">
+        <article class="panel">
+          <div class="panel-head">
+            <h3>Warm latency per search</h3>
+            <span>lower is better</span>
+          </div>
+          <div class="latency-bars" id="latencyBars"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <h3>Index ROM size</h3>
+            <span>persisted index file</span>
+          </div>
+          <div class="latency-bars size-bars" id="sizeBars"></div>
+        </article>
+      </div>
+
+      <div class="definitions-grid">
+        <article>
+          <h3>KPI headers</h3>
+          <dl>
+            <dt>Self R@1 / Self R@10</dt>
+            <dd>Recall when the query is one of the stored base vectors. R@1 means the exact vector is ranked first; R@10 means it appears anywhere in top 10.</dd>
+            <dt>Random R@1 / Random R@10</dt>
+            <dd>Recall for deterministic normalized random mixture queries, compared against exact FP32 top-10 over the same dataset size.</dd>
+            <dt>Index ms</dt>
+            <dd>Time to add vectors, rotate, calibrate, quantize, and store the in-memory quantized index.</dd>
+            <dt>Prep ms</dt>
+            <dd>One-time search-cache preparation: rotation/codebook cache and SIMD-friendly blocked layout. It is not paid for every warm query.</dd>
+            <dt>us/query</dt>
+            <dd>Actual warm search latency per query after prep. This is the production latency number to watch.</dd>
+          </dl>
+        </article>
+        <article>
+          <h3>What each method does</h3>
+          <dl>
+            <dt>FP32 exact</dt>
+            <dd>Brute-force exact dot-product scan over all vectors in the selected dataset. It is used as ground truth for recall.</dd>
+            <dt>HNSW</dt>
+            <dd>Uses the Rust hnsw_rs graph implementation bundled into the APK native library; no phone-side package install is required.</dd>
+            <dt>8-bit TurboQuant</dt>
+            <dd>Uses the extended Rust 8-bit codebook, TQ+ calibration, byte-code packed storage, and an ARM block-major byte scorer.</dd>
+            <dt>4/3/2-bit TurboQuant</dt>
+            <dd>Use the original TurboQuant low-bit path: bit-plane packed codes, blocked layout, per-query nibble LUTs, and NEON lookup accumulation.</dd>
+          </dl>
+        </article>
+      </div>
+
+      <div class="native-stack">
+        <div class="section-copy wide">
+          <p class="eyebrow">Why native Rust is fast</p>
+          <h2>Low latency comes from memory layout and NEON-friendly kernels</h2>
+        </div>
+        <div class="native-grid">
+          <article>
+            <span class="step">1</span>
+            <h3>Rust JNI, not Java loops</h3>
+            <p>A foreground service enters native Rust once. Dot products, HNSW graph search, quantization, top-k heaps, blocked layout, and search kernels run in optimized release Rust.</p>
+          </article>
+          <article>
+            <span class="step">2</span>
+            <h3>Blocked 32-vector layout</h3>
+            <p><code>prepare()</code> repacks compact codes into 32-vector blocks so a query scans contiguous bytes instead of chasing one vector at a time.</p>
+          </article>
+          <article>
+            <span class="step">3</span>
+            <h3>NEON nibble LUT path</h3>
+            <p>2/3/4-bit search uses ARM NEON table lookups and vector accumulators. The query stays FP32, but database codes remain compressed.</p>
+          </article>
+          <article>
+            <span class="step">4</span>
+            <h3>Optimized exact 8-bit path</h3>
+            <p>8-bit has full byte codes, so the app precomputes exact query x centroid lookup rows with NEON and then scans contiguous block-major code bytes.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section split" id="kv-cache">
+      <div class="section-copy">
+        <p class="eyebrow">Application 2</p>
+        <h2>TurboQuant for the LLM KV cache</h2>
+        <p>
+          During generation, every previous token leaves key and value vectors in the KV cache. Long context makes that cache huge. Quantizing it reduces memory bandwidth and lets the model keep longer histories or serve more users.
+        </p>
+        <p>
+          The catch is accuracy: attention depends on dot products between the current query and cached keys. TurboQuant targets this by preserving geometry and correcting residual inner-product bias.
+        </p>
+      </div>
+      <div class="panel cache-panel">
+        <div class="panel-head">
+          <h3>Autoregressive memory grows with context</h3>
+          <span>one token adds K and V</span>
+        </div>
+        <div class="cache-stack" id="cacheStack"></div>
+      </div>
+    </section>
+
+    <section class="section kv-deep">
+      <div class="section-copy wide">
+        <p class="eyebrow">KV-cache mechanics</p>
+        <h2>What happens at store time and attention time</h2>
+        <p>
+          TurboQuant does not replace attention. It changes how past keys and values are stored. New K/V vectors are compressed as they enter the cache. Later, attention kernels read compressed blocks, reconstruct approximate K/V values only for the current computation, and discard those temporary values.
+        </p>
+      </div>
+
+      <div class="kv-step-grid">
+        <article class="kv-step-card">
+          <span class="step">store time</span>
+          <h3>1. Compute the new token's K and V</h3>
+          <div class="kv-token-row">
+            <b>token t</b>
+            <span>K_t fp16/bf16</span>
+            <span>V_t fp16/bf16</span>
+          </div>
+          <p>The model creates normal full-precision key and value vectors for the newest token.</p>
+        </article>
+
+        <article class="kv-step-card">
+          <span class="step">compress</span>
+          <h3>2. Rotate, PolarQuant, then QJL</h3>
+          <div class="mini-pipeline">
+            <span>K_t</span>
+            <i>R</i>
+            <span>polar codes</span>
+            <span class="bits">01011001</span>
+          </div>
+          <p>Random rotation smooths channels, PolarQuant stores radius plus angle, and QJL stores the residual as sign bits.</p>
+        </article>
+
+        <article class="kv-step-card">
+          <span class="step">cache memory</span>
+          <h3>3. Store compressed K/V codes</h3>
+          <div class="compressed-cache">
+            <div><small>K cache</small><strong>codes + bits</strong></div>
+            <div><small>V cache</small><strong>codes + bits</strong></div>
+          </div>
+          <p>The long-context memory footprint shrinks because the cache keeps compact codes instead of full tensors.</p>
+        </article>
+      </div>
+
+      <div class="attention-diagram">
+        <div class="attention-left">
+          <span class="step">query time</span>
+          <h3>The current query stays high precision</h3>
+          <p>
+            The query is temporary, so there is little memory benefit in storing it compressed. If cached keys live in rotated space, the query is rotated at runtime before scoring.
+          </p>
+          <code>q_rot = R q_current</code>
+        </div>
+        <div class="attention-right">
+          <div class="attention-stage">
+            <strong>compressed K blocks</strong>
+            <span>load</span>
+            <strong>on-the-fly dequant</strong>
+            <span>score</span>
+            <strong>q_rot dot K_hat</strong>
+          </div>
+          <div class="attention-stage values">
+            <strong>compressed V blocks</strong>
+            <span>load</span>
+            <strong>on-the-fly dequant</strong>
+            <span>mix</span>
+            <strong>sum weights * V_hat</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="kv-notes">
+        <article>
+          <h3>Is dequantization needed?</h3>
+          <p>
+            Yes, but usually it is fused into the attention kernel. The full cache is not permanently expanded. A block is loaded, dequantized into registers or fast local memory, used for dot products or value accumulation, then discarded.
+          </p>
+        </article>
+        <article>
+          <h3>Keys and values have different jobs</h3>
+          <p>
+            Keys must preserve attention scores, so the rotated query and reconstructed keys must keep dot products close. Values must preserve the final weighted representation, so the value approximation must be accurate after softmax weights are applied.
+          </p>
+        </article>
+        <article>
+          <h3>Why this helps long context</h3>
+          <p>
+            Long prompts repeatedly read old K/V vectors. Compression reduces cache memory and memory bandwidth, which can unlock larger context windows, higher batch sizes, or faster attention on suitable kernels.
+          </p>
+        </article>
+      </div>
+
+      <div class="formula-band kv-formula">
+        <code>cache stores codes; attention uses K_hat and V_hat temporarily</code>
+        <span>The model still computes normal attention, but the cache representation is compact.</span>
+      </div>
+    </section>
+
+    <section class="section results">
+      <div class="section-copy wide">
+        <p class="eyebrow">Reported results</p>
+        <h2>What public reports claim</h2>
+        <p>
+          The TurboQuant paper reports quality neutrality around 3.5 bits per channel for KV-cache quantization and marginal degradation around 2.5 bits per channel. Public Google coverage reported long-context evaluations such as Needle in a Haystack, LongBench, RULER, ZeroSCROLLS, and L-Eval on open models including Gemma and Mistral. Media coverage also reported at least 6x KV-cache memory reduction and up to 8x faster attention-logit computation on H100 GPUs.
+        </p>
+      </div>
+      <div class="result-grid">
+        <div class="result-card">
+          <strong>3.5 bits/channel</strong>
+          <span>reported quality-neutral KV cache setting</span>
+        </div>
+        <div class="result-card">
+          <strong>2.5 bits/channel</strong>
+          <span>reported marginal quality degradation</span>
+        </div>
+        <div class="result-card">
+          <strong>6x+</strong>
+          <span>reported KV-cache memory reduction in public coverage</span>
+        </div>
+        <div class="result-card">
+          <strong>Needle tests</strong>
+          <span>reported matching full-precision behavior under long context</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section references">
+      <div class="section-copy wide">
+        <p class="eyebrow">Sources</p>
+        <h2>Further reading</h2>
+        <ul>
+          <li><a href="https://arxiv.org/abs/2504.19874">TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate</a></li>
+          <li><a href="https://arxiv.org/abs/2502.02617">PolarQuant: Quantizing KV Caches with Polar Transformation</a></li>
+          <li><a href="https://www.tomshardware.com/tech-industry/artificial-intelligence/googles-turboquant-compresses-llm-kv-caches-to-3-bits-with-no-accuracy-loss">Public report on Google TurboQuant results</a></li>
+          <li><a href="https://arxiv.org/abs/2606.21448">Fast-TurboQuant: A Multiplier-Free Online Vector Quantization Approach</a></li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>TurboQuant explained</span>
+    <a href="#top" onclick="window.scrollTo({top:0,behavior:'smooth'});return false;">Back to top</a>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "TurboQuantBench"
+include ":app"                // existing benchmark app — untouched
+include ":turbovec-lib"       // new: IdMapIndex AAR library
+include ":sample-app"         // new: full-featured interactive sample app
